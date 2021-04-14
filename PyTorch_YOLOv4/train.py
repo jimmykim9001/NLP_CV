@@ -393,7 +393,7 @@ if __name__ == '__main__':
     parser.add_argument('--local_rank', type=int, default=-1, help='DDP parameter, do not modify')
     parser.add_argument('--logdir', type=str, default='runs/', help='logging directory')
     opt = parser.parse_args()
-
+    print("started")
     # Resume
     if opt.resume:
         last = get_latest_run() if opt.resume == 'get_last' else opt.resume  # resume from most recent run
@@ -402,17 +402,29 @@ if __name__ == '__main__':
         opt.weights = last if opt.resume and not opt.weights else opt.weights
     if opt.local_rank == -1 or ("RANK" in os.environ and os.environ["RANK"] == "0"):
         check_git_status()
-
-    opt.hyp = opt.hyp or ('data/hyp.scratch.yaml')
-    opt.data, opt.cfg, opt.hyp = check_file(opt.data), check_file(opt.cfg), check_file(opt.hyp)  # check files
+    print("if")
+    print(opt.hyp)
+    print("hi")
+    #opt.hyp = opt.hyp or ('data/hyp.scratch.yaml')
+    opt.hyp =('drive/My Drive/nlp_cv/PyTorch_YOLOv4/data/hyp.scratch.yaml')
+    print('1')
+    opt.data=check_file(opt.data)
+    print(opt.data)
+    print("huiii")
+    print("2")
+    opt.cfg= check_file(opt.cfg)
+    print("4")
+    opt.hyp=check_file(opt.hyp)
+    print("65")
+    #opt.data, opt.cfg, opt.hyp = check_file(opt.data), check_file(opt.cfg), check_file(opt.hyp)  # check files
     assert len(opt.cfg) or len(opt.weights), 'either --cfg or --weights must be specified'
-
+    print("opts")
     opt.img_size.extend([opt.img_size[-1]] * (2 - len(opt.img_size)))  # extend to 2 sizes (train, test)
     device = select_device(opt.device, batch_size=opt.batch_size)
     opt.total_batch_size = opt.batch_size
     opt.world_size = 1
     opt.global_rank = -1
-
+    print("opt2")
     # DDP mode
     if opt.local_rank != -1:
         assert torch.cuda.device_count() > opt.local_rank
