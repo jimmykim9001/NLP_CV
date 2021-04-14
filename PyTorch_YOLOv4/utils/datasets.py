@@ -4,8 +4,10 @@ import os
 import random
 import shutil
 import time
+import re
 from pathlib import Path
 from threading import Thread
+from IPython import embed
 
 import cv2
 import numpy as np
@@ -13,6 +15,7 @@ import torch
 from PIL import Image, ExifTags
 from torch.utils.data import Dataset
 from tqdm import tqdm
+from pycocotools.coco import COCO
 
 from utils.general import xyxy2xywh, xywh2xyxy, torch_distributed_zero_first
 
@@ -46,11 +49,11 @@ def exif_size(img):
     return s
 
 
-def create_dataloader(path, imgsz, batch_size, stride, opt, hyp=None, augment=False, cache=False, pad=0.0, rect=False,
+def create_dataloader(path, captions_path, imgsz, batch_size, stride, opt, hyp=None, augment=False, cache=False, pad=0.0, rect=False,
                       local_rank=-1, world_size=1):
     # Make sure only the first process in DDP process the dataset first, and the following others can use the cache.
     with torch_distributed_zero_first(local_rank):
-        dataset = LoadImagesAndLabels(path, imgsz, batch_size,
+        dataset = LoadImagesAndLabels(path, captions_path, imgsz, batch_size,
                                       augment=augment,  # augment images
                                       hyp=hyp,  # augmentation hyperparameters
                                       rect=rect,  # rectangular training
@@ -291,7 +294,7 @@ class LoadStreams:  # multiple IP or RTSP cameras
 
 
 class LoadImagesAndLabels(Dataset):  # for training/testing
-    def __init__(self, path, img_size=640, batch_size=16, augment=False, hyp=None, rect=False, image_weights=False,
+    def __init__(self, path, captions_path, img_size=640, batch_size=16, augment=False, hyp=None, rect=False, image_weights=False,
                  cache_images=False, single_cls=False, stride=32, pad=0.0):
         try:
             f = []  # image files
@@ -320,6 +323,8 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
             print(len(self.img_files))
         except Exception as e:
             raise Exception('Error loading data from %s: %s\nSee %s' % (path, e, help_url))
+        # set up MSCOCO annotations path
+        self.captions_coco = COCO(captions_path)
 
         n = len(self.img_files)
         assert n > 0, 'No images found in %s. See %s' % (path, help_url)
@@ -340,7 +345,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         # Define labels
         self.label_files = [x.replace('images', 'labels').replace(os.path.splitext(x)[-1], '.txt') for x in
                             self.img_files]
-        print("labelfiles")
+        print("labelfiles", self.label_files)
         # Check cache
         cache_path = str(Path(self.label_files[0]).parent) + '.cache'  # cached labels
         if os.path.isfile(cache_path) and os.path.getsize(cache_path) > 0:
@@ -352,7 +357,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
 
         # Get labels
         print("get labels")
-        labels, shapes = zip(*[cache[x] for x in self.img_files])
+        labels, shapes, captions = zip(*[cache[x] for x in self.img_files])
         self.shapes = np.array(shapes, dtype=np.float64)
         self.labels = list(labels)
 
@@ -440,12 +445,13 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
 
         # Cache images into memory for faster training (WARNING: large datasets may exceed system RAM)
         self.imgs = [None] * n
+        self.captions = [None] * n
         if cache_images:
             gb = 0  # Gigabytes of cached images
             pbar = tqdm(range(len(self.img_files)), desc='Caching images')
             self.img_hw0, self.img_hw = [None] * n, [None] * n
             for i in pbar:  # max 10k images
-                self.imgs[i], self.img_hw0[i], self.img_hw[i] = load_image(self, i)  # img, hw_original, hw_resized
+                self.imgs[i], self.img_hw0[i], self.img_hw[i], self.captions[i] = load_image(self, i)  # img, hw_original, hw_resized
                 gb += self.imgs[i].nbytes
                 pbar.desc = 'Caching images (%.1fGB)' % (gb / 1E9)
 
@@ -458,6 +464,10 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         for (img, label) in pbar:
             try:
                 l = []
+                # get caption
+                img_fn = img.split(os.sep)[-1]
+                caption = get_caption(self, img_fn)
+
                 image = Image.open(img)
                 image.verify()  # PIL verify
                 # _ = io.imread(img)  # skimage verify (from skimage import io)
@@ -468,7 +478,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
                         l = np.array([x.split() for x in f.read().splitlines()], dtype=np.float32)  # labels
                 if len(l) == 0:
                     l = np.zeros((0, 5), dtype=np.float32)
-                x[img] = [l, shape]
+                x[img] = [l, shape, caption]
                 c+=1
             except Exception as e:
                 x[img] = None
@@ -494,7 +504,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         hyp = self.hyp
         if self.mosaic:
             # Load mosaic
-            img, labels = load_mosaic(self, index)
+            img, labels, captions = load_mosaic(self, index)
             shapes = None
 
             # MixUp https://arxiv.org/pdf/1710.09412.pdf
@@ -506,7 +516,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
 
         else:
             # Load image
-            img, (h0, w0), (h, w) = load_image(self, index)
+            img, (h0, w0), (h, w), captions = load_image(self, index)
 
             # Letterbox
             shape = self.batch_shapes[self.batch[index]] if self.rect else self.img_size  # final letterboxed shape
@@ -568,22 +578,24 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
         img = np.ascontiguousarray(img)
 
-        return torch.from_numpy(img), labels_out, self.img_files[index], shapes
+        return torch.from_numpy(img), labels_out, self.img_files[index], shapes, captions
 
     @staticmethod
     def collate_fn(batch):
-        img, label, path, shapes = zip(*batch)  # transposed
+        img, label, path, shapes, captions = zip(*batch)  # transposed
         for i, l in enumerate(label):
             l[:, 0] = i  # add target image index for build_targets()
-        return torch.stack(img, 0), torch.cat(label, 0), path, shapes
+        return torch.stack(img, 0), torch.cat(label, 0), path, shapes, captions
 
 
 # Ancillary functions --------------------------------------------------------------------------------------------------
 def load_image(self, index):
     # loads 1 image from dataset, returns img, original hw, resized hw
+    path = self.img_files[index]
+    img_fn = path.split(os.sep)[-1]
+    caption = get_caption(self, img_fn)
     img = self.imgs[index]
     if img is None:  # not cached
-        path = self.img_files[index]
         img = cv2.imread(path)  # BGR
         assert img is not None, 'Image Not Found ' + path
         h0, w0 = img.shape[:2]  # orig hw
@@ -591,10 +603,24 @@ def load_image(self, index):
         if r != 1:  # always resize down, only resize up if training with augmentation
             interp = cv2.INTER_AREA if r < 1 and not self.augment else cv2.INTER_LINEAR
             img = cv2.resize(img, (int(w0 * r), int(h0 * r)), interpolation=interp)
-        return img, (h0, w0), img.shape[:2]  # img, hw_original, hw_resized
+        return img, (h0, w0), img.shape[:2], caption  # img, hw_original, hw_resized
     else:
-        return self.imgs[index], self.img_hw0[index], self.img_hw[index]  # img, hw_original, hw_resized
+        return self.imgs[index], self.img_hw0[index], self.img_hw[index], caption  # img, hw_original, hw_resized
 
+def get_caption(self, img_filename):
+    """
+    Precondition: img_filename in format of \d{1,}.jpg
+    :param: img_filename (string) filename of image we are loading
+    :returns: the caption of that image
+    """
+    # ensure format of image filename is correct
+    img_pattern = re.compile('^(\d{1,})\.jpg$')
+    reg_match = img_pattern.match(img_filename)
+    assert reg_match is not None, f"incorrect image filename {img_filename}"
+    img_id = int(reg_match.group(1)) # the numbers in filename
+
+    ann_ids =  self.captions_coco.getAnnIds(imgIds=[img_id])
+    return self.captions_coco.loadAnns(ann_ids)[0]['caption']
 
 def augment_hsv(img, hgain=0.5, sgain=0.5, vgain=0.5):
     r = np.random.uniform(-1, 1, 3) * [hgain, sgain, vgain] + 1  # random gains
@@ -619,12 +645,13 @@ def load_mosaic(self, index):
     # loads images in a mosaic
 
     labels4 = []
+    captions4 = []
     s = self.img_size
     yc, xc = s, s  # mosaic center x, y
     indices = [index] + [random.randint(0, len(self.labels) - 1) for _ in range(3)]  # 3 additional image indices
     for i, index in enumerate(indices):
         # Load image
-        img, _, (h, w) = load_image(self, index)
+        img, _, (h, w), caption = load_image(self, index)
 
         # place img in img4
         if i == 0:  # top left
@@ -654,6 +681,7 @@ def load_mosaic(self, index):
             labels[:, 3] = w * (x[:, 1] + x[:, 3] / 2) + padw
             labels[:, 4] = h * (x[:, 2] + x[:, 4] / 2) + padh
         labels4.append(labels)
+        captions4.append(caption)
 
     # Concat/clip labels
     if len(labels4):
@@ -674,7 +702,7 @@ def load_mosaic(self, index):
                                        perspective=self.hyp['perspective'],
                                        border=self.mosaic_border)  # border to remove
 
-    return img4, labels4
+    return img4, labels4, captions4
 
 
 def replicate(img, labels):

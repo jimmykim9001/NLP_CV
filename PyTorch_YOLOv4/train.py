@@ -5,6 +5,7 @@ import random
 import time
 from pathlib import Path
 
+from IPython import embed
 import numpy as np
 import torch.distributed as dist
 import torch.nn.functional as F
@@ -52,7 +53,9 @@ def train(hyp, opt, device, tb_writer=None):
     with open(opt.data) as f:
         data_dict = yaml.load(f, Loader=yaml.FullLoader)  # model dict
     train_path = data_dict['train']
+    train_captions_path = data_dict['train_caption']
     test_path = data_dict['val']
+    test_captions_path = data_dict['train_caption']
     nc, names = (1, ['item']) if opt.single_cls else (int(data_dict['nc']), data_dict['names'])  # number classes, names
     assert len(names) == nc, '%g names found for nc=%g dataset in %s' % (len(names), nc, opt.data)  # check
 
@@ -142,7 +145,7 @@ def train(hyp, opt, device, tb_writer=None):
         model = DDP(model, device_ids=[opt.local_rank], output_device=(opt.local_rank))
 
     # Trainloader
-    dataloader, dataset = create_dataloader(train_path, imgsz, batch_size, gs, opt, hyp=hyp, augment=True,
+    dataloader, dataset = create_dataloader(train_path, train_captions_path, imgsz, batch_size, gs, opt, hyp=hyp, augment=True,
                                             cache=opt.cache_images, rect=opt.rect, local_rank=rank,
                                             world_size=opt.world_size)
     mlc = np.concatenate(dataset.labels, 0)[:, 0].max()  # max label class
@@ -153,7 +156,7 @@ def train(hyp, opt, device, tb_writer=None):
     if rank in [-1, 0]:
         ema.updates = start_epoch * nb // accumulate  # set EMA updates ***
         # local_rank is set to -1. Because only the first process is expected to do evaluation.
-        testloader = create_dataloader(test_path, imgsz_test, batch_size, gs, opt, hyp=hyp, augment=False,
+        testloader = create_dataloader(test_path, test_captions_path, imgsz_test, batch_size, gs, opt, hyp=hyp, augment=False,
                                        cache=opt.cache_images, rect=True, local_rank=-1, world_size=opt.world_size)[0]
 
     # Model parameters
@@ -223,7 +226,7 @@ def train(hyp, opt, device, tb_writer=None):
             print(('\n' + '%10s' * 8) % ('Epoch', 'gpu_mem', 'GIoU', 'obj', 'cls', 'total', 'targets', 'img_size'))
             pbar = tqdm(pbar, total=nb)  # progress bar
         optimizer.zero_grad()
-        for i, (imgs, targets, paths, _) in pbar:  # batch -------------------------------------------------------------
+        for i, (imgs, targets, paths, _, captions) in pbar:  # batch -------------------------------------------------------------
             ni = i + nb * epoch  # number integrated batches (since train start)
             imgs = imgs.to(device, non_blocking=True).float() / 255.0  # uint8 to float32, 0-255 to 0.0-1.0
 
@@ -393,7 +396,7 @@ if __name__ == '__main__':
     parser.add_argument('--local_rank', type=int, default=-1, help='DDP parameter, do not modify')
     parser.add_argument('--logdir', type=str, default='runs/', help='logging directory')
     opt = parser.parse_args()
-    print("started")
+
     # Resume
     if opt.resume:
         last = get_latest_run() if opt.resume == 'get_last' else opt.resume  # resume from most recent run
@@ -402,29 +405,20 @@ if __name__ == '__main__':
         opt.weights = last if opt.resume and not opt.weights else opt.weights
     if opt.local_rank == -1 or ("RANK" in os.environ and os.environ["RANK"] == "0"):
         check_git_status()
-    print("if")
-    print(opt.hyp)
-    print("hi")
-    #opt.hyp = opt.hyp or ('data/hyp.scratch.yaml')
-    opt.hyp =('drive/My Drive/nlp_cv/PyTorch_YOLOv4/data/hyp.scratch.yaml')
-    print('1')
+
+    opt.hyp = opt.hyp or ('data/hyp.scratch.yaml')
     opt.data=check_file(opt.data)
-    print(opt.data)
-    print("huiii")
-    print("2")
     opt.cfg= check_file(opt.cfg)
-    print("4")
     opt.hyp=check_file(opt.hyp)
-    print("65")
     #opt.data, opt.cfg, opt.hyp = check_file(opt.data), check_file(opt.cfg), check_file(opt.hyp)  # check files
     assert len(opt.cfg) or len(opt.weights), 'either --cfg or --weights must be specified'
-    print("opts")
+
     opt.img_size.extend([opt.img_size[-1]] * (2 - len(opt.img_size)))  # extend to 2 sizes (train, test)
     device = select_device(opt.device, batch_size=opt.batch_size)
     opt.total_batch_size = opt.batch_size
     opt.world_size = 1
     opt.global_rank = -1
-    print("opt2")
+
     # DDP mode
     if opt.local_rank != -1:
         assert torch.cuda.device_count() > opt.local_rank
