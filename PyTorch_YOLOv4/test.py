@@ -116,7 +116,7 @@ def test(data,
         with torch.no_grad():
             # Run model
             t = time_synchronized()
-            inf_out, train_out = model(img, augment=augment)  # inference and training outputs
+            inf_out, train_out = model(img, captions.cuda(), augment=augment)  # inference and training outputs
             t0 += time_synchronized() - t
 
             # Compute loss

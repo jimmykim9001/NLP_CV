@@ -1,3 +1,5 @@
+import transformers
+from IPython import embed
 from utils.google_utils import *
 from utils.layers import *
 from utils.parse_config import *
@@ -82,6 +84,12 @@ def create_modules(module_defs, img_size, cfg):
                 modules.add_module('activation', Swish())
             elif mdef['activation'] == 'mish':
                 modules.add_module('activation', Mish())
+
+        # added
+        elif mdef['type'] == 'textconvolutional':
+            filters = mdef['filters']
+            k = mdef['size']
+            modules = TextConvolution(k, input_channels=output_filters[-1], output_channels=filters)
 
         elif mdef['type'] == 'BatchNorm2d':
             filters = output_filters[-1]
@@ -178,6 +186,53 @@ def create_modules(module_defs, img_size, cfg):
         routs_binary[i] = True
     return module_list, routs_binary
 
+class TextConvolution(nn.Module):
+    def __init__(self, filter_size=3, input_channels=1, output_channels=1):
+        super().__init__()
+        # the number of input/output channels of the text-adjusted convolution
+        self.input_channels, self.output_channels = input_channels, output_channels
+        self.filter_size = filter_size
+
+        # out of the box bert model
+        self.bert_model = transformers.BertModel.from_pretrained('bert-base-uncased')
+        self.hidden_size = 768
+
+        # attention layer that calculates which tokens in the text input are important
+        # for each combination of input-to-output channel
+        self.alpha_lin = nn.Linear(self.hidden_size, input_channels * output_channels)
+        self.softmax = nn.Softmax(dim=1) # softmax to normalize all alpha across sequence
+
+        # linear layer that is responsible for converting BERT embeddings into
+        # a convolutional filter
+        self.conv_linear = nn.Linear(self.hidden_size, self.filter_size ** 2)
+
+    def forward(self, input_tensor, input_image):
+        _, input_channels, input_height, input_width = input_image.shape
+        batch_size, seq_len = input_tensor.shape
+
+        last_bert = self.bert_model(input_tensor).last_hidden_state
+        reshaped_last_bert = last_bert.view(batch_size, self.hidden_size, seq_len)
+
+        alpha = self.alpha_lin(last_bert)
+        norm_alpha = self.softmax(alpha) # [batch_size, seq_len, 1]
+
+        # utilize attention to create hidden state representations. This then
+        # is converted to convolutions
+        weights = torch.matmul(reshaped_last_bert, norm_alpha)
+        weights = weights.view(batch_size, -1, self.hidden_size)
+        weights = weights.view(batch_size, self.output_channels, self.input_channels, self.hidden_size)
+        weights = self.conv_linear(weights) 
+        weights = weights.view(batch_size, self.output_channels, self.input_channels, 3, 3)
+
+        # apply ith-convolution to ith image in batch
+        adj_conv = F.conv2d(\
+                input_image.view(1, batch_size * input_channels, input_height, input_width),
+                weights.view(batch_size * self.output_channels, self.input_channels, 3, 3),
+                groups=batch_size
+                ) # [batch_size, output_channels, size - f + 1, size - f + 1]
+        adj_conv = adj_conv.view(batch_size, self.output_channels, adj_conv.shape[-2], adj_conv.shape[-1])
+        adj_conv = F.relu(adj_conv)
+        return adj_conv
 
 class YOLOLayer(nn.Module):
     def __init__(self, anchors, nc, img_size, yolo_index, layers, stride):
@@ -287,10 +342,10 @@ class Darknet(nn.Module):
         self.seen = np.array([0], dtype=np.int64)  # (int64) number of images seen during training
         self.info(verbose) if not ONNX_EXPORT else None  # print model description
 
-    def forward(self, x, augment=False, verbose=False):
+    def forward(self, x, captions, augment=False, verbose=False):
 
         if not augment:
-            return self.forward_once(x)
+            return self.forward_once(x, captions)
         else:  # Augment images (inference and test only) https://github.com/ultralytics/yolov3/issues/931
             img_size = x.shape[-2:]  # height, width
             s = [0.83, 0.67]  # scales
@@ -300,7 +355,7 @@ class Darknet(nn.Module):
                                     torch_utils.scale_img(x, s[1], same_shape=False),  # scale
                                     )):
                 # cv2.imwrite('img%g.jpg' % i, 255 * xi[0].numpy().transpose((1, 2, 0))[:, :, ::-1])
-                y.append(self.forward_once(xi)[0])
+                y.append(self.forward_once(xi, captions)[0])
 
             y[1][..., :4] /= s[0]  # scale
             y[1][..., 0] = img_size[1] - y[1][..., 0]  # flip lr
@@ -317,7 +372,7 @@ class Darknet(nn.Module):
             y = torch.cat(y, 1)
             return y, None
 
-    def forward_once(self, x, augment=False, verbose=False):
+    def forward_once(self, x, captions, augment=False, verbose=False):
         img_size = x.shape[-2:]  # height, width
         yolo_out, out = [], []
         if verbose:
@@ -341,6 +396,8 @@ class Darknet(nn.Module):
                     sh = [list(x.shape)] + [list(out[i].shape) for i in module.layers]  # shapes
                     str = ' >> ' + ' + '.join(['layer %g %s' % x for x in zip(l, sh)])
                 x = module(x, out)  # WeightedFeatureFusion(), FeatureConcat()
+            elif name == 'TextConvolution':
+                x = module(captions, x)
             elif name == 'YOLOLayer':
                 yolo_out.append(module(x, out))
             else:  # run module directly, i.e. mtype = 'convolutional', 'upsample', 'maxpool', 'batchnorm2d' etc.

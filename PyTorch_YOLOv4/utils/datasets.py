@@ -7,11 +7,12 @@ import time
 import re
 from pathlib import Path
 from threading import Thread
-from IPython import embed
 
 import cv2
 import numpy as np
 import torch
+import transformers
+from IPython import embed
 from PIL import Image, ExifTags
 from torch.utils.data import Dataset
 from tqdm import tqdm
@@ -325,6 +326,7 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
             raise Exception('Error loading data from %s: %s\nSee %s' % (path, e, help_url))
         # set up MSCOCO annotations path
         self.captions_coco = COCO(captions_path)
+        self.tokenizer = transformers.BertTokenizer.from_pretrained('bert-base-uncased')
 
         n = len(self.img_files)
         assert n > 0, 'No images found in %s. See %s' % (path, help_url)
@@ -509,10 +511,12 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
 
             # MixUp https://arxiv.org/pdf/1710.09412.pdf
             if random.random() < hyp['mixup']:
-                img2, labels2 = load_mosaic(self, random.randint(0, len(self.labels) - 1))
+                idx = random.randint(0, len(self.labels) - 1)
+                img2, labels2, captions2 = load_mosaic(self, idx)
                 r = np.random.beta(8.0, 8.0)  # mixup ratio, alpha=beta=8.0
                 img = (img * r + img2 * (1 - r)).astype(np.uint8)
                 labels = np.concatenate((labels, labels2), 0)
+                captions = captions + captions2
 
         else:
             # Load image
@@ -578,6 +582,9 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         img = img[:, :, ::-1].transpose(2, 0, 1)  # BGR to RGB, to 3x416x416
         img = np.ascontiguousarray(img)
 
+        # process captions into seq_ids
+        captions = process_caption(self, captions)
+
         return torch.from_numpy(img), labels_out, self.img_files[index], shapes, captions
 
     @staticmethod
@@ -585,15 +592,24 @@ class LoadImagesAndLabels(Dataset):  # for training/testing
         img, label, path, shapes, captions = zip(*batch)  # transposed
         for i, l in enumerate(label):
             l[:, 0] = i  # add target image index for build_targets()
-        return torch.stack(img, 0), torch.cat(label, 0), path, shapes, captions
+        return torch.stack(img, 0), torch.cat(label, 0), path, shapes, torch.cat(captions, 0)
 
 
 # Ancillary functions --------------------------------------------------------------------------------------------------
+def process_caption(self, captions):
+    if not isinstance(captions, list):
+        captions = [captions]
+    assert isinstance(captions[0], str), "captions must be strings"
+    seq_ids = self.tokenizer(captions, padding=True, return_tensors="pt") # TODO deal with attention masks
+    return seq_ids['input_ids']
+
 def load_image(self, index):
     # loads 1 image from dataset, returns img, original hw, resized hw
     path = self.img_files[index]
     img_fn = path.split(os.sep)[-1]
     caption = get_caption(self, img_fn)
+    # caption = process_caption(self, caption)
+
     img = self.imgs[index]
     if img is None:  # not cached
         img = cv2.imread(path)  # BGR
@@ -682,6 +698,8 @@ def load_mosaic(self, index):
             labels[:, 4] = h * (x[:, 2] + x[:, 4] / 2) + padh
         labels4.append(labels)
         captions4.append(caption)
+
+    # captions4 = process_caption(self, captions4)
 
     # Concat/clip labels
     if len(labels4):

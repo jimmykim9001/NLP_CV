@@ -145,7 +145,7 @@ def train(hyp, opt, device, tb_writer=None):
         model = DDP(model, device_ids=[opt.local_rank], output_device=(opt.local_rank))
 
     # Trainloader
-    dataloader, dataset = create_dataloader(train_path, train_captions_path, imgsz, batch_size, gs, opt, hyp=hyp, augment=True,
+    dataloader, dataset = create_dataloader(train_path, train_captions_path, imgsz, batch_size, gs, opt, hyp=hyp, augment=False,
                                             cache=opt.cache_images, rect=opt.rect, local_rank=rank,
                                             world_size=opt.world_size)
     mlc = np.concatenate(dataset.labels, 0)[:, 0].max()  # max label class
@@ -252,7 +252,7 @@ def train(hyp, opt, device, tb_writer=None):
             # Autocast
             with amp.autocast(enabled=cuda):
                 # Forward
-                pred = model(imgs)
+                pred = model(imgs, captions.cuda())
 
                 # Loss
                 loss, loss_items = compute_loss(pred, targets.to(device), model)  # scaled by batch_size
