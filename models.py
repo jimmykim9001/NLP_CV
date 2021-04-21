@@ -36,20 +36,20 @@ class TextConvolution(nn.Module):
         reshaped_last_bert = last_bert.view(batch_size, self.hidden_size, seq_len)
 
         alpha = self.alpha_lin(last_bert)
-        norm_alpha = self.softmax(alpha) # [batch_size, seq_len, 1]
+        norm_alpha = self.softmax(alpha) # [batch_size, seq_len, input_channels * output_channels]
 
         # utilize attention to create hidden state representations. This then
         # is converted to convolutions
-        weights = torch.matmul(reshaped_last_bert, norm_alpha)
+        weights = torch.matmul(reshaped_last_bert, norm_alpha) # [batch_size, hidden_size, input * output]
         weights = weights.view(batch_size, -1, self.hidden_size)
         weights = weights.view(batch_size, self.output_channels, self.input_channels, self.hidden_size)
         weights = self.conv_linear(weights) 
-        weights = weights.view(batch_size, self.output_channels, self.input_channels, 3, 3)
+        weights = weights.view(batch_size, self.output_channels, self.input_channels, self.filter_size, self.filter_size)
 
         # apply ith-convolution to ith image in batch
         adj_conv = F.conv2d(\
                 input_image.view(1, batch_size * input_channels, input_height, input_width),
-                weights.view(batch_size * self.output_channels, self.input_channels, 3, 3),
+                weights.view(batch_size * self.output_channels, self.input_channels, self.filter_size, self.filter_size),
                 groups=batch_size
                 ) # [batch_size, output_channels, size - f + 1, size - f + 1]
         adj_conv = adj_conv.view(batch_size, self.output_channels, adj_conv.shape[-2], adj_conv.shape[-1])
