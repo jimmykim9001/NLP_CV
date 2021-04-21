@@ -222,12 +222,12 @@ class TextConvolution(nn.Module):
         weights = weights.view(batch_size, -1, self.hidden_size)
         weights = weights.view(batch_size, self.output_channels, self.input_channels, self.hidden_size)
         weights = self.conv_linear(weights) 
-        weights = weights.view(batch_size, self.output_channels, self.input_channels, 3, 3)
+        weights = weights.view(batch_size, self.output_channels, self.input_channels, self.filter_size, self.filter_size)
 
         # apply ith-convolution to ith image in batch
         adj_conv = F.conv2d(\
                 input_image.view(1, batch_size * input_channels, input_height, input_width),
-                weights.view(batch_size * self.output_channels, self.input_channels, 3, 3),
+                weights.view(batch_size * self.output_channels, self.input_channels, self.filter_size, self.filter_size),
                 groups=batch_size
                 ) # [batch_size, output_channels, size - f + 1, size - f + 1]
         adj_conv = adj_conv.view(batch_size, self.output_channels, adj_conv.shape[-2], adj_conv.shape[-1])
