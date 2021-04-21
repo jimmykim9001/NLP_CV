@@ -42,6 +42,7 @@ def train(hyp, opt, device, tb_writer=None):
 
     # TODO: Use DDP logging. Only the first process is allowed to log.
     # Save run settings
+    print("before fileopen")
     with open(log_dir / 'hyp.yaml', 'w') as f:
         yaml.dump(hyp, f, sort_keys=False)
     with open(log_dir / 'opt.yaml', 'w') as f:
@@ -52,24 +53,37 @@ def train(hyp, opt, device, tb_writer=None):
     init_seeds(2 + rank)
     with open(opt.data) as f:
         data_dict = yaml.load(f, Loader=yaml.FullLoader)  # model dict
+    print("loaded yaml")
     train_path = data_dict['train']
     train_captions_path = data_dict['train_caption']
     test_path = data_dict['val']
     test_captions_path = data_dict['train_caption']
     nc, names = (1, ['item']) if opt.single_cls else (int(data_dict['nc']), data_dict['names'])  # number classes, names
     assert len(names) == nc, '%g names found for nc=%g dataset in %s' % (len(names), nc, opt.data)  # check
-
+    print("done with config")
     # Model
     pretrained = weights.endswith('.pt')
     if pretrained:
         with torch_distributed_zero_first(rank):
             attempt_download(weights)  # download if not found locally
+        print("start")
         ckpt = torch.load(weights, map_location=device)  # load checkpoint
+        print("loaded")
         model = Darknet(opt.cfg).to(device)  # create
-        state_dict = {k: v for k, v in ckpt['model'].items() if model.state_dict()[k].numel() == v.numel()}
+        #state_dict = {k: v for k, v in ckpt['model'].items() if model.state_dict()[k].numel() == v.numel()}
+        state_dict={}
+        print([k for k, _ in ckpt['model'].items()])
+        for k, v in ckpt['model'].items():
+            
+            if model.state_dict()[k].numel() == v.numel():
+                state_dict[k] = v
+            else:
+                print(k)
+                
         model.load_state_dict(state_dict, strict=False)
         print('Transferred %g/%g items from %s' % (len(state_dict), len(model.state_dict()), weights))  # report
     else:
+        print("not pretrained")
         model = Darknet(opt.cfg).to(device) # create
 
     # Optimizer

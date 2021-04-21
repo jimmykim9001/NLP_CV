@@ -222,12 +222,12 @@ class TextConvolution(nn.Module):
         weights = weights.view(batch_size, -1, self.hidden_size)
         weights = weights.view(batch_size, self.output_channels, self.input_channels, self.hidden_size)
         weights = self.conv_linear(weights) 
-        weights = weights.view(batch_size, self.output_channels, self.input_channels, self.filter_size, self.filter_size)
+        weights = weights.view(batch_size, self.output_channels, self.input_channels, 3, 3)
 
         # apply ith-convolution to ith image in batch
         adj_conv = F.conv2d(\
                 input_image.view(1, batch_size * input_channels, input_height, input_width),
-                weights.view(batch_size * self.output_channels, self.input_channels, self.filter_size, self.filter_size),
+                weights.view(batch_size * self.output_channels, self.input_channels, 3, 3),
                 groups=batch_size
                 ) # [batch_size, output_channels, size - f + 1, size - f + 1]
         adj_conv = adj_conv.view(batch_size, self.output_channels, adj_conv.shape[-2], adj_conv.shape[-1])
@@ -468,19 +468,27 @@ def load_darknet_weights(self, weights, cutoff=-1):
         weights = np.fromfile(f, dtype=np.float32)  # the rest are weights
 
     ptr = 0
+    print("III")
+    s = set()
     for i, (mdef, module) in enumerate(zip(self.module_defs[:cutoff], self.module_list[:cutoff])):
-        if mdef['type'] == 'convolutional':
+        s.add(mdef['type'])
+        if mdef['type'] == 'convolutional' or mdef['type']=="textconvolutional":
             conv = module[0]
+            if mdef['type']=="textconvolutional":
+                print("ww")
             if mdef['batch_normalize']:
                 # Load BN bias, weights, running mean and running variance
                 bn = module[1]
                 nb = bn.bias.numel()  # number of biases
-                # Bias
-                bn.bias.data.copy_(torch.from_numpy(weights[ptr:ptr + nb]).view_as(bn.bias))
-                ptr += nb
-                # Weight
-                bn.weight.data.copy_(torch.from_numpy(weights[ptr:ptr + nb]).view_as(bn.weight))
-                ptr += nb
+                try:
+                    # Bias
+                    bn.bias.data.copy_(torch.from_numpy(weights[ptr:ptr + nb]).view_as(bn.bias))
+                    ptr += nb
+                    # Weight
+                    bn.weight.data.copy_(torch.from_numpy(weights[ptr:ptr + nb]).view_as(bn.weight))
+                    ptr += nb
+                except:
+                    embed()
                 # Running Mean
                 bn.running_mean.data.copy_(torch.from_numpy(weights[ptr:ptr + nb]).view_as(bn.running_mean))
                 ptr += nb
@@ -490,6 +498,7 @@ def load_darknet_weights(self, weights, cutoff=-1):
             else:
                 # Load conv. bias
                 nb = conv.bias.numel()
+                
                 conv_b = torch.from_numpy(weights[ptr:ptr + nb]).view_as(conv.bias)
                 conv.bias.data.copy_(conv_b)
                 ptr += nb
@@ -497,7 +506,7 @@ def load_darknet_weights(self, weights, cutoff=-1):
             nw = conv.weight.numel()  # number of weights
             conv.weight.data.copy_(torch.from_numpy(weights[ptr:ptr + nw]).view_as(conv.weight))
             ptr += nw
-
+    print(s)
 
 def save_weights(self, path='model.weights', cutoff=-1):
     # Converts a PyTorch model to Darket format (*.pt to *.weights)

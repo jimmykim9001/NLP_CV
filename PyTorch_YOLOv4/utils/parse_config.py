@@ -15,11 +15,12 @@ def parse_model_cfg(path):
     lines = [x for x in lines if x and not x.startswith('#')]
     lines = [x.rstrip().lstrip() for x in lines]  # get rid of fringe whitespaces
     mdefs = []  # module definitions
+    print("PArsing")
     for line in lines:
         if line.startswith('['):  # This marks the start of a new block
             mdefs.append({})
             mdefs[-1]['type'] = line[1:-1].rstrip()
-            if mdefs[-1]['type'] == 'convolutional':
+            if mdefs[-1]['type'] == 'convolutional' or mdefs[-1]['type'] == 'textconvolutional':
                 mdefs[-1]['batch_normalize'] = 0  # pre-populate with zeros (may be overwritten later)
         else:
             key, val = line.split("=")
@@ -45,6 +46,7 @@ def parse_model_cfg(path):
     f = []  # fields
     for x in mdefs[1:]:
         [f.append(k) for k in x if k not in f]
+    print(mdefs)
     u = [x for x in f if x not in supported]  # unsupported fields
     assert not any(u), "Unsupported fields %s in %s. See https://github.com/ultralytics/yolov3/issues/631" % (u, path)
 
