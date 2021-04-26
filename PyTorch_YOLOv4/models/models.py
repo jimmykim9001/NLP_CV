@@ -91,6 +91,14 @@ def create_modules(module_defs, img_size, cfg):
             k = mdef['size']
             modules = TextConvolution(k, input_channels=output_filters[-1], output_channels=filters)
 
+        elif mdef['type'] == 'bert':
+            modules = BertModel()
+            # make bert non-trainable
+            for param in modules.parameters():
+                param.requires_grad = False
+            filters = output_filters[0] # just copy filters for now
+            # requires bert model to be first
+
         elif mdef['type'] == 'BatchNorm2d':
             filters = output_filters[-1]
             modules = nn.BatchNorm2d(filters, momentum=0.03, eps=1E-4)
@@ -186,6 +194,14 @@ def create_modules(module_defs, img_size, cfg):
         routs_binary[i] = True
     return module_list, routs_binary
 
+class BertModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.bert_model = transformers.BertModel.from_pretrained('bert-base-uncased')
+
+    def forward(self, input_text):
+        return self.bert_model(input_text).last_hidden_state
+
 class TextConvolution(nn.Module):
     def __init__(self, filter_size=3, input_channels=1, output_channels=1):
         super().__init__()
@@ -194,7 +210,7 @@ class TextConvolution(nn.Module):
         self.filter_size = filter_size
 
         # out of the box bert model
-        self.bert_model = transformers.BertModel.from_pretrained('bert-base-uncased')
+        # self.bert_model = transformers.BertModel.from_pretrained('bert-base-uncased')
         self.hidden_size = 768
 
         # attention layer that calculates which tokens in the text input are important
@@ -208,9 +224,10 @@ class TextConvolution(nn.Module):
 
     def forward(self, input_tensor, input_image):
         _, input_channels, input_height, input_width = input_image.shape
-        batch_size, seq_len = input_tensor.shape
+        batch_size, seq_len, _ = input_tensor.shape
 
-        last_bert = self.bert_model(input_tensor).last_hidden_state
+        # last_bert = self.bert_model(input_tensor).last_hidden_state
+        last_bert = input_tensor
         reshaped_last_bert = last_bert.view(batch_size, self.hidden_size, seq_len)
 
         alpha = self.alpha_lin(last_bert)
@@ -388,6 +405,8 @@ class Darknet(nn.Module):
                            torch_utils.scale_img(x, s[1]),  # scale
                            ), 0)
 
+        # print('forward once darknnet')
+        # embed()
         for i, module in enumerate(self.module_list):
             name = module.__class__.__name__
             if name in ['WeightedFeatureFusion', 'FeatureConcat', 'FeatureConcat2', 'FeatureConcat3', 'FeatureConcat_l']:  # sum, concat
@@ -398,6 +417,10 @@ class Darknet(nn.Module):
                 x = module(x, out)  # WeightedFeatureFusion(), FeatureConcat()
             elif name == 'TextConvolution':
                 x = module(captions, x)
+            elif name == 'BertModel':
+                captions = module(captions)
+                # print('bertmodel')
+                # embed()
             elif name == 'YOLOLayer':
                 yolo_out.append(module(x, out))
             else:  # run module directly, i.e. mtype = 'convolutional', 'upsample', 'maxpool', 'batchnorm2d' etc.
@@ -480,15 +503,12 @@ def load_darknet_weights(self, weights, cutoff=-1):
                 # Load BN bias, weights, running mean and running variance
                 bn = module[1]
                 nb = bn.bias.numel()  # number of biases
-                try:
-                    # Bias
-                    bn.bias.data.copy_(torch.from_numpy(weights[ptr:ptr + nb]).view_as(bn.bias))
-                    ptr += nb
-                    # Weight
-                    bn.weight.data.copy_(torch.from_numpy(weights[ptr:ptr + nb]).view_as(bn.weight))
-                    ptr += nb
-                except:
-                    embed()
+                # Bias
+                bn.bias.data.copy_(torch.from_numpy(weights[ptr:ptr + nb]).view_as(bn.bias))
+                ptr += nb
+                # Weight
+                bn.weight.data.copy_(torch.from_numpy(weights[ptr:ptr + nb]).view_as(bn.weight))
+                ptr += nb
                 # Running Mean
                 bn.running_mean.data.copy_(torch.from_numpy(weights[ptr:ptr + nb]).view_as(bn.running_mean))
                 ptr += nb
