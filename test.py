@@ -17,12 +17,12 @@ from models import BERTModelLightning
 def generate_dataset(n=100):
     outputs, images, sequences = [], [], []
     for idx in range(n):
-        input_npy = np.zeros((5, 5))
+        input_npy = np.zeros((32, 32))
         if random.random() < 0.5:
-            input_npy[:,:2] = np.random.randint(2, size=((5,2)))
+            input_npy[:,:16] = np.random.randint(2, size=((32,16)))
             true = 0
         else:
-            input_npy[:,3:] = np.random.randint(2, size=((5,2)))
+            input_npy[:,16:] = np.random.randint(2, size=((32,16)))
             true = 1
         for idx_d, direction in enumerate(['left', 'right']):
             images.append(input_npy)
@@ -34,7 +34,7 @@ class TestAdjConv(unittest.TestCase):
     def test_basic(self):
         tokenizer = transformers.BertTokenizer.from_pretrained('bert-base-uncased')
 
-        bbm = BERTModelLightning(output_channels=8)
+        bbm = BERTModelLightning([1, 16, 32, 32, 64], output_channels=8)
         imgs, seqs, outs = generate_dataset()
 
         # process seq_ids
@@ -52,7 +52,7 @@ class TestAdjConv(unittest.TestCase):
         outs = final_outs
 
         tb_logger = pl_loggers.TensorBoardLogger('logs/')
-        trainer = pl.Trainer(max_epochs=5, logger=tb_logger, log_every_n_steps=1)
+        trainer = pl.Trainer(max_epochs=10, logger=tb_logger, log_every_n_steps=1)
 
         idx = np.random.permutation(imgs.shape[0])
         imgs, seq_ids, outs = imgs[idx], seq_ids[idx], outs[idx]

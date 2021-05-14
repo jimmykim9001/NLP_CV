@@ -17,6 +17,9 @@ class TextConvolution(nn.Module):
 
         # out of the box bert model
         self.bert_model = transformers.BertModel.from_pretrained('bert-base-uncased')
+        # ignore gradient updates for bert
+        for param in self.bert_model.parameters():
+            param.requires_grad = False
         self.hidden_size = 768
 
         # attention layer that calculates which tokens in the text input are important
@@ -50,7 +53,7 @@ class TextConvolution(nn.Module):
         adj_conv = F.conv2d(\
                 input_image.view(1, batch_size * input_channels, input_height, input_width),
                 weights.view(batch_size * self.output_channels, self.input_channels, self.filter_size, self.filter_size),
-                groups=batch_size
+                groups=batch_size, padding=(self.filter_size - 1) // 2
                 ) # [batch_size, output_channels, size - f + 1, size - f + 1]
         adj_conv = adj_conv.view(batch_size, self.output_channels, adj_conv.shape[-2], adj_conv.shape[-1])
         adj_conv = F.relu(adj_conv)
@@ -59,15 +62,23 @@ class TextConvolution(nn.Module):
 class BERTModelLightning(pl.LightningModule):
     """
     [CLS, find, the, person] (attention) -> [768] -> convolution matrix -> output
+    conv_filters must include input
     """
-    def __init__(self, filter_size=3, input_channels=1, output_channels=1):
+    def __init__(self, conv_filters, filter_size=3, output_channels=1, last_size=16, maxpool_skip=2):
         super().__init__()
+        self.relu_fn = nn.ReLU()
+        self.maxpool_skip = maxpool_skip
+        self.maxpool = nn.MaxPool2d(2, stride=2)
+
+        self.conv_filters = conv_filters
+        if self.conv_filters:
+            self.conv_list = [nn.Conv2d(conv_filters[idx], conv_filters[idx + 1], 3, padding=1) \
+                    for idx in range(len(conv_filters) - 1)]
+
         self.loss_fn = nn.BCEWithLogitsLoss()
 
-        self.tc = TextConvolution(filter_size, input_channels, output_channels)
-
-        self.final_linear = nn.Linear(output_channels * (filter_size ** 2), 2)
-
+        self.tc = TextConvolution(filter_size, self.conv_filters[-1], output_channels)
+        self.final_linear = nn.Linear(output_channels * (last_size ** 2), 2)
         self.pred_softmax = nn.Softmax(dim=1)
 
     def configure_optimizers(self):
@@ -75,6 +86,14 @@ class BERTModelLightning(pl.LightningModule):
         return optimizer
 
     def forward(self, input_tensor, input_image):
+        for idx in range(len(self.conv_filters) - 1):
+            input_image = self.conv_list[idx](input_image)
+            input_image = self.relu_fn(input_image)
+
+            # max pooling layers (don't include at the end)
+            if idx % self.maxpool_skip == self.maxpool_skip - 1 and idx != len(self.conv_filters) - 2:
+                input_image = self.maxpool(input_image)
+
         adj_conv = self.tc(input_tensor, input_image)
 
         flattened = torch.flatten(adj_conv, start_dim=1)
@@ -91,5 +110,18 @@ class BERTModelLightning(pl.LightningModule):
         self.log('train_loss', loss, on_epoch=True, prog_bar=True, logger=True)
 
         correct = (outs.argmax() == self.pred_softmax(output).argmax()).item()
-        self.log('accuracy', int(correct), on_epoch=True, prog_bar=True, logger=True, on_step=False)
+        self.log('train_accuracy', int(correct), on_epoch=True, prog_bar=True, logger=True, on_step=False)
+        return loss
+
+    def training_step(self, train_batch, batch_idx):
+        seq_ids, imgs, outs = train_batch
+        seq_ids = torch.unsqueeze(seq_ids, 0)
+        imgs = torch.unsqueeze(torch.Tensor(imgs), 0)
+        outs = torch.unsqueeze(torch.Tensor(outs), 0)
+        output = self(seq_ids, imgs)
+        loss = self.loss_fn(output, outs)
+        self.log('valid_loss', loss, on_epoch=True, prog_bar=True, logger=True)
+
+        correct = (outs.argmax() == self.pred_softmax(output).argmax()).item()
+        self.log('valid_accuracy', int(correct), on_epoch=True, prog_bar=True, logger=True, on_step=False)
         return loss
