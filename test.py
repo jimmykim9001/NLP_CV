@@ -3,52 +3,52 @@ import random
 
 from tqdm import tqdm
 import IPython
+import torch
 import numpy as np
-from torch.utils.data import DataLoader
+import pandas as pd
 import pytorch_lightning as pl
 from pytorch_lightning import loggers as pl_loggers
-import pandas as pd
+from torch.utils.data import DataLoader
 
 from models import BERTModelLightning
 from dataset import ToyDataset
 
-def generate_dataset(n=100, dim=32, direction='vertical'):
-    # slice objects
-    full_slice = slice(None, None) # full dataset
-    start_slice = slice(None, dim // 2)
-    end_slice = slice(dim // 2, None)
 
-    if direction == 'vertical':
-        size = ((dim // 2, dim))
-        directions = ['top', 'bottom']
-    else:
-        size = ((dim, dim // 2))
-        directions = ['left', 'right']
-
+def generate_dataset(n=100, isLeft=True, dimension=32):
     outputs, images, sequences = [], [], []
+    halved = int(dimension/2)
+    if isLeft:
+        names= ['left', 'right']
+    else:
+        names = ['top', 'bottom']
     for idx in range(n):
-        input_npy = np.zeros((dim, dim))
+        input_npy = np.zeros((dimension, dimension))
         if random.random() < 0.5:
-            use_slice = start_slice
+            if isLeft:
+                input_npy[:,:halved] = np.random.randint(2, size=((dimension,halved)))
+            else:
+                input_npy[:halved,:] = np.random.randint(2, size=((halved, dimension)))
             true = 0
         else:
-            use_slice = end_slice
+            if isLeft:
+                input_npy[:,halved:] = np.random.randint(2, size=((dimension,halved)))
+            else:
+                input_npy[halved:,:] = np.random.randint(2, size=((halved,dimension)))
             true = 1
-
-        # create slice object
-        if direction == 'vertical':
-            curr_slice = use_slice, full_slice
-        else:
-            curr_slice = full_slice, use_slice
-
-        input_npy[curr_slice] = np.random.randint(2, size=size)
-
-        # iterate over directions
-        for idx_d, curr_dir in enumerate(directions):
+        for idx_d, direction in enumerate(names):
             images.append(input_npy)
-            sequences.append(curr_dir)
+            sequences.append(direction)
             outputs.append(int(idx_d == true))
     return np.stack(images, axis=0), np.array(sequences), np.array(outputs)
+
+def predict(bbm, dataset, save_path='logs/train_results.csv'):
+    imgs, outs, seq_ids = torch.Tensor(dataset.imgs), torch.Tensor(dataset.outs), dataset.seq_ids
+
+    probs = bbm(seq_ids, imgs)
+    tostore= bbm.pred_softmax(probs).tolist()
+    zeros, ones = map(list, zip(*tostore))
+    df = pd.DataFrame({'prob_zero': zeros, 'prob_one': ones, 'correct': outs})
+    df.to_csv(save_path)
 
 class TestAdjConv(unittest.TestCase):
     def test_basic(self):
@@ -60,14 +60,11 @@ class TestAdjConv(unittest.TestCase):
         valid_dl = DataLoader(valid_ds, batch_size=4)
 
         tb_logger = pl_loggers.CSVLogger('logs/')
-        trainer = pl.Trainer(max_epochs=10, logger=tb_logger, log_every_n_steps=1)
+        trainer = pl.Trainer(max_epochs=1, logger=tb_logger, log_every_n_steps=1)
 
-        #, val_dataloader
         trainer.fit(bbm, train_dl, valid_dl)
-        modelData = [bbm.zeroProb_tr, bbm.oneProb_tr, bbm.preds_tr, bbm.corrLabels_tr]
-        d= {'prob_zero': modelData[0], 'prob_one': modelData[1], 'pred':modelData[2], 'correct': modelData[3]}
-        df = pd.DataFrame(data=d)
-
+        predict(bbm, train_ds)
+        # predict(bbm, train_ds)
 
 if __name__ == "__main__":
     unittest.main()
