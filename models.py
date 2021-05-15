@@ -84,7 +84,7 @@ class BERTModelLightning(pl.LightningModule):
         self.tc = TextConvolution(filter_size, self.conv_filters[-1], output_channels)
         self.final_linear = nn.Linear(output_channels * (last_size ** 2), 2)
         self.pred_softmax = nn.Softmax(dim=1)
-
+        """
         #obtaining stuff
         self.zeroProb_tr = []
         self.oneProb_tr = []
@@ -94,6 +94,7 @@ class BERTModelLightning(pl.LightningModule):
         self.oneProb_va = []
         self.preds_va= []
         self.corrLabels_va=[]
+        """
     def configure_optimizers(self):
         optimizer = torch.optim.SGD(self.parameters(), 0.01)
         return optimizer
@@ -119,14 +120,9 @@ class BERTModelLightning(pl.LightningModule):
         imgs = torch.unsqueeze(torch.Tensor(imgs), 0)
         outs = torch.unsqueeze(torch.Tensor(outs), 0)
         output = self(seq_ids, imgs)
-        tostore= self.pred_softmax(output).tolist()[0]
         
         loss = self.loss_fn(output, outs)
         self.log('train_loss', loss, on_epoch=True, prog_bar=True, logger=True)
-        self.zeroProb_tr.append(tostore[0])
-        self.oneProb_tr.append(tostore[1])
-        self.preds_tr.append(self.pred_softmax(output).argmax().tolist())
-        self.corrLabels_tr.append(outs.argmax().tolist())
         correct = (outs.argmax() == self.pred_softmax(output).argmax()).item()
         self.log('train_accuracy', int(correct), on_epoch=True, prog_bar=True, logger=True, on_step=False)
         return loss
@@ -136,9 +132,7 @@ class BERTModelLightning(pl.LightningModule):
         #seq_ids, imgs, outs
         print(dataloader_nb)
         seq_ids = torch.unsqueeze(seq_ids, 0)
-        print(f"imgs{imgs}")
-        print(f"seq_ids{seq_ids}")
-        print(f"outs {outs}")
+        
         imgs = torch.unsqueeze(torch.Tensor(imgs), 0)
         outs = torch.unsqueeze(torch.Tensor(outs), 0)
         output = self(seq_ids, imgs)
