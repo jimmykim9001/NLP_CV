@@ -9,14 +9,14 @@ import transformers
 import pytorch_lightning as pl
 
 class TextConvolution(nn.Module):
-    def __init__(self, filter_size=3, input_channels=1, output_channels=1):
+    def __init__(self, filter_size=3, input_channels=1, output_channels=1, device='cpu'):
         super().__init__()
         # the number of input/output channels of the text-adjusted convolution
         self.input_channels, self.output_channels = input_channels, output_channels
         self.filter_size = filter_size
 
         # out of the box bert model
-        self.bert_model = transformers.BertModel.from_pretrained('bert-base-uncased')
+        self.bert_model = transformers.BertModel.from_pretrained('bert-base-uncased').to(device)
         # ignore gradient updates for bert
         for param in self.bert_model.parameters():
             param.requires_grad = False
@@ -24,14 +24,18 @@ class TextConvolution(nn.Module):
 
         # attention layer that calculates which tokens in the text input are important
         # for each combination of input-to-output channel
-        self.alpha_lin = nn.Linear(self.hidden_size, input_channels * output_channels)
-        self.softmax = nn.Softmax(dim=1) # softmax to normalize all alpha across sequence
+        self.alpha_lin = nn.Linear(self.hidden_size, input_channels * output_channels).to(device)
+        self.softmax = nn.Softmax(dim=1).to(device) # softmax to normalize all alpha across sequence
 
         # linear layer that is responsible for converting BERT embeddings into
         # a convolutional filter
-        self.conv_linear = nn.Linear(self.hidden_size, self.filter_size ** 2)
+        self.conv_linear = nn.Linear(self.hidden_size, self.filter_size ** 2).to(device)
+
+        self.set_device = device
 
     def forward(self, input_tensor, input_image):
+        input_tensor, input_image = input_tensor.to(self.set_device), input_image.to(self.set_device)
+
         _, input_channels, input_height, input_width = input_image.shape
         batch_size, seq_len = input_tensor.shape
 
@@ -65,29 +69,36 @@ class BERTModelLightning(pl.LightningModule):
     [CLS, find, the, person] (attention) -> [768] -> convolution matrix -> output
     conv_filters must include input
     """
-    def __init__(self, conv_filters, filter_size=3, output_channels=1, last_size=16, maxpool_skip=2):
+    def __init__(self, conv_filters, filter_size=3, output_channels=1, last_size=16, maxpool_skip=2, \
+            device='cpu'):
         super().__init__()
-        self.relu_fn = nn.ReLU()
+        self.relu_fn = nn.ReLU().to(device)
         self.maxpool_skip = maxpool_skip
-        self.maxpool = nn.MaxPool2d(2, stride=2)
+        self.maxpool = nn.MaxPool2d(2, stride=2).to(device)
 
         self.conv_filters = conv_filters
         if self.conv_filters:
-            self.conv_list = [nn.Conv2d(conv_filters[idx], conv_filters[idx + 1], 3, padding=1) \
+            self.conv_list = [nn.Conv2d(conv_filters[idx], conv_filters[idx + 1], 3, padding=1).to(device) \
                     for idx in range(len(conv_filters) - 1)]
 
         self.loss_fn = nn.BCEWithLogitsLoss()
 
-        self.tc = TextConvolution(filter_size, self.conv_filters[-1], output_channels)
-        self.final_linear = nn.Linear(output_channels * (last_size ** 2), 2)
-        self.pred_softmax = nn.Softmax(dim=1)
+        self.tc = TextConvolution(filter_size, self.conv_filters[-1], output_channels, device=device).to(device)
+        self.final_linear = nn.Linear(output_channels * (last_size ** 2), 2).to(device)
+        self.pred_softmax = nn.Softmax(dim=1).to(device)
+
+        self.train_acc = pl.metrics.Accuracy()
+        self.valid_acc = pl.metrics.Accuracy()
+        self.set_device = device
 
     def configure_optimizers(self):
-        optimizer = torch.optim.SGD(self.parameters(), 0.01)
+        optimizer = torch.optim.Adam(self.parameters(), 0.005)
         return optimizer
 
     def forward(self, input_tensor, input_image):
-        input_image = input_image.type(torch.float32) # coerce type to float
+        # force onto device
+        input_image = input_image.to(self.set_device).type(torch.float32) # coerce type to float
+        input_tensor = input_tensor.to(self.set_device)
 
         for idx in range(len(self.conv_filters) - 1):
             input_image = self.conv_list[idx](input_image)
@@ -105,20 +116,28 @@ class BERTModelLightning(pl.LightningModule):
 
     def training_step(self, train_batch, batch_idx):
         seq_ids, imgs, outs = train_batch
+        seq_ids, imgs = seq_ids.to(self.set_device), imgs.to(self.set_device)
+
         output = self(seq_ids, imgs)
         
         loss = self.loss_fn(output, outs)
         self.log('train_loss', loss, on_epoch=True, prog_bar=True, logger=True, on_step=False)
-        correct = (outs.argmax(dim=1) == self.pred_softmax(output).argmax(dim=1)).type(torch.float32).mean().item()
-        self.log('train_accuracy', float(correct), on_epoch=True, prog_bar=True, logger=True, on_step=False)
+        # correct = (outs.argmax(dim=1) == self.pred_softmax(output).argmax(dim=1)).type(torch.float32).mean().item()
+        # self.log('train_accuracy', float(correct), on_epoch=True, prog_bar=True, logger=True, on_step=False)
+        self.log('train_accuracy', self.train_acc(output.argmax(dim=1), outs.argmax(dim=1)), \
+                on_epoch=True, prog_bar=True, logger=True, on_step=False)
         return loss
 
     def validation_step(self, train_batch, batch_idx):
         seq_ids, imgs, outs= train_batch
+
+        seq_ids, imgs = seq_ids.to(self.set_device), imgs.to(self.set_device)
         output = self(seq_ids, imgs)
         loss = self.loss_fn(output, outs)
         self.log('valid_loss', loss, on_epoch=True, prog_bar=True, logger=True, on_step=False)
 
-        correct = (outs.argmax(dim=1) == self.pred_softmax(output).argmax(dim=1)).type(torch.float32).mean().item()
-        self.log('valid_accuracy', float(correct), on_epoch=True, prog_bar=True, logger=True, on_step=False)
+        # correct = (outs.argmax(dim=1) == self.pred_softmax(output).argmax(dim=1)).type(torch.float32).mean().item()
+        # self.log('valid_accuracy', float(correct), on_epoch=True, prog_bar=True, logger=True, on_step=False)
+        self.log('valid_accuracy', self.valid_acc(output.argmax(dim=1), outs.argmax(dim=1)), \
+                on_epoch=True, prog_bar=True, logger=True, on_step=False)
         return loss

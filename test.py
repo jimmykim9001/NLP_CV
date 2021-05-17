@@ -41,30 +41,56 @@ def generate_dataset(n=100, isLeft=True, dimension=32):
             outputs.append(int(idx_d == true))
     return np.stack(images, axis=0), np.array(sequences), np.array(outputs)
 
-def predict(bbm, dataset, save_path='logs/train_results.csv'):
-    imgs, outs, seq_ids = torch.Tensor(dataset.imgs), torch.Tensor(dataset.outs), dataset.seq_ids
+def predict(bbm, dataloader, save_path='logs/train_results.csv', device='cpu'):
+    bbm = bbm.to(device)
+    all_zeros, all_ones, all_outs = [], [], []
+    for seq_ids, imgs, outs in dataloader: 
 
-    probs = bbm(seq_ids, imgs)
-    tostore= bbm.pred_softmax(probs).tolist()
-    zeros, ones = map(list, zip(*tostore))
-    df = pd.DataFrame({'prob_zero': zeros, 'prob_one': ones, 'correct': outs})
+        probs = bbm(seq_ids.to(device), imgs.to(device))
+        tostore= bbm.pred_softmax(probs).tolist()
+        zeros, ones = map(list, zip(*tostore))
+
+        # save
+        all_zeros += zeros
+        all_ones += ones
+        all_outs += outs.argmax(dim=1).tolist()
+    df = pd.DataFrame({'prob_zero': all_zeros, 'prob_one': all_ones, 'correct': all_outs})
     df.to_csv(save_path)
 
 class TestAdjConv(unittest.TestCase):
     def test_basic(self):
-        bbm = BERTModelLightning([1, 16, 32, 32, 64], output_channels=8)
-        train_ds = ToyDataset(*generate_dataset())
-        valid_ds = ToyDataset(*generate_dataset(50))
+        dims = [16, 32, 64, 128]
+        # ns = [100, 200, 300, 400]
+        ns = [400, 400, 400, 400]
 
-        train_dl = DataLoader(train_ds, batch_size=4)
-        valid_dl = DataLoader(valid_ds, batch_size=4)
+        for dim, n in zip(dims, ns):
+            bbm = BERTModelLightning([1, 16, 32, 64, 128], output_channels=64, last_size=dim//2, device='cuda')
+            bbm.to('cuda')
+            train_ds = ToyDataset(*generate_dataset(n, dimension=dim))
+            valid_ds = ToyDataset(*generate_dataset(n, dimension=dim))
 
-        tb_logger = pl_loggers.CSVLogger('logs/')
-        trainer = pl.Trainer(max_epochs=1, logger=tb_logger, log_every_n_steps=1)
+            train_dl = DataLoader(train_ds, batch_size=16)
+            valid_dl = DataLoader(valid_ds, batch_size=16)
 
-        trainer.fit(bbm, train_dl, valid_dl)
-        predict(bbm, train_ds)
-        # predict(bbm, train_ds)
+            tb_logger = pl_loggers.CSVLogger('logs/', name=f'dim{dim}')
+            trainer = pl.Trainer(max_epochs=10, logger=tb_logger, log_every_n_steps=1, gpus=1)
+
+            trainer.fit(bbm, train_dl, valid_dl)
+
+            predict(bbm, train_dl, save_path=f'logs/dim{dim}/train_results.csv', device='cuda')
+            predict(bbm, valid_dl, save_path=f'logs/dim{dim}/valid_results.csv', device='cuda')
+
+        # train on top/bottom
+        # test_ds = ToyDataset(*generate_dataset(isLeft=False, n=10))
+        # test_dl = DataLoader(test_ds, batch_size=1)
+        #
+        # test_ds2 = ToyDataset(*generate_dataset(isLeft=False, n=50))
+        # test_dl2 = DataLoader(test_ds2, batch_size=1)
+        #
+        # test_logger = pl_loggers.CSVLogger('test_logs/')
+        # test_trainer = pl.Trainer(max_epochs=5, logger=test_logger, log_every_n_steps=1)
+        # test_trainer.fit(bbm, test_dl, test_dl2)
+        # predict(bbm, test_ds, save_path='test_logs/test_results.csv')
 
 if __name__ == "__main__":
     unittest.main()
